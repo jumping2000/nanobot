@@ -219,7 +219,7 @@ jobs:
 
   # ========================================================================
   # JOB 3: TEST
-  # FIX: Linux-only matrix (Windows removed — Nanobot is not officially supported on Windows)
+  # FIX: Linux-only matrix
   # ========================================================================
   test:
     name: Test Python ${{ matrix.python-version }}
@@ -326,7 +326,7 @@ jobs:
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          password: ${{ secrets.PAT_TOKEN}}
 
       - name: Extract metadata
         id: meta
