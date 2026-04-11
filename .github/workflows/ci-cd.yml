@@ -219,7 +219,7 @@ jobs:
 
   # ========================================================================
   # JOB 3: TEST
-  # FIX: Linux-only matrix
+  # FIX: Linux-only matrix (Windows removed — Nanobot is not officially supported on Windows)
   # ========================================================================
   test:
     name: Test Python ${{ matrix.python-version }}
@@ -452,89 +452,93 @@ jobs:
 
       - name: Prepare email content
         id: email
+        # All GitHub Actions context values are injected as env vars so no
+        # expressions appear inside the Python string literals — avoids both
+        # the YAML heredoc Unicode issue and any shell/sed quoting hazards.
+        env:
+          STATUS:       ${{ steps.status.outputs.status }}
+          VERSION:      ${{ needs.sync-release.outputs.synced_version || 'N/A' }}
+          REPOSITORY:   ${{ github.repository }}
+          REF_NAME:     ${{ github.ref_name }}
+          COMMIT_SHA:   ${{ github.sha }}
+          ACTOR:        ${{ github.actor }}
+          RUN_ID:       ${{ github.run_id }}
+          SERVER_URL:   ${{ github.server_url }}
+          UPSTREAM:     ${{ env.UPSTREAM_REPO }}
         run: |
-          STATUS="${{ steps.status.outputs.status }}"
-          VERSION="${{ needs.sync-release.outputs.synced_version || 'N/A' }}"
+          python3 - << 'PYEOF'
+          import os, datetime
 
-          if [ "$STATUS" == "success" ]; then
-            EMOJI="✅"
-            SUBJECT="Nanobot CI/CD Success - $VERSION"
-          elif [ "$STATUS" == "failure" ]; then
-            EMOJI="❌"
-            SUBJECT="Nanobot CI/CD FAILED - $VERSION"
-          elif [ "$STATUS" == "skipped" ]; then
-            EMOJI="⏭️"
-            SUBJECT="Nanobot CI/CD Skipped - No Updates"
-          else
-            EMOJI="⚠️"
-            SUBJECT="Nanobot CI/CD Warning - $VERSION"
-          fi
+          status  = os.environ["STATUS"]
+          version = os.environ["VERSION"]
 
-          echo "subject=$SUBJECT" >> $GITHUB_OUTPUT
-          echo "emoji=$EMOJI"     >> $GITHUB_OUTPUT
+          emoji_map = {
+            "success": "OK",
+            "failure": "FAILED",
+            "skipped": "SKIPPED",
+          }
+          label = emoji_map.get(status, "WARNING")
+          subject = f"Nanobot CI/CD {label} - {version}"
 
-          # FIX: quoted heredoc (<<'EOF') prevents unintended shell expansion of
-          #      untrusted values such as github.actor or github.sha.
-          #      Safe placeholders are substituted explicitly via sed below.
-          cat > /tmp/email_body.txt <<'EOF'
-__EMOJI__ Nanobot CI/CD Pipeline Notification
+          separator = "-" * 40
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+          status_table = open("/tmp/status_table.txt").read().strip()
+          timestamp    = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
 
-📊 PIPELINE STATUS: __STATUS__
+          repo       = os.environ["REPOSITORY"]
+          ref        = os.environ["REF_NAME"]
+          sha        = os.environ["COMMIT_SHA"]
+          actor      = os.environ["ACTOR"]
+          run_id     = os.environ["RUN_ID"]
+          server_url = os.environ["SERVER_URL"]
+          upstream   = os.environ["UPSTREAM"]
 
-__STATUS_TABLE__
+          body = "\n".join([
+            f"[{label}] Nanobot CI/CD Pipeline Notification",
+            "",
+            separator,
+            "",
+            f"PIPELINE STATUS: {status.upper()}",
+            "",
+            status_table,
+            "",
+            separator,
+            "",
+            "DETAILS:",
+            "",
+            f"  Version Synced : {version}",
+            f"  Repository     : {repo}",
+            f"  Branch         : {ref}",
+            f"  Commit         : {sha}",
+            f"  Triggered by   : {actor}",
+            f"  Run ID         : {run_id}",
+            "",
+            separator,
+            "",
+            "LINKS:",
+            "",
+            f"  GitHub Actions : {server_url}/{repo}/actions/runs/{run_id}",
+            f"  Repository     : {server_url}/{repo}",
+            f"  Upstream       : https://github.com/{upstream}",
+            "",
+            separator,
+            "",
+            f"Timestamp: {timestamp}",
+            "",
+            "---",
+            "This is an automated notification from your Nanobot CI/CD pipeline.",
+          ])
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+          with open("/tmp/email_body.txt", "w") as f:
+            f.write(body)
 
-📋 DETAILS:
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+            f.write(f"subject={subject}\n")
+            f.write(f"status_label={label}\n")
 
-• Version Synced : __VERSION__
-• Repository    : __REPOSITORY__
-• Branch        : __REF_NAME__
-• Commit        : __SHA__
-• Triggered by  : __ACTOR__
-• Run ID        : __RUN_ID__
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-🔗 LINKS:
-
-• GitHub Actions : __SERVER_URL__/__REPOSITORY__/actions/runs/__RUN_ID__
-• Repository    : __SERVER_URL__/__REPOSITORY__
-• Upstream      : https://github.com/__UPSTREAM_REPO__
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-📅 Timestamp: __TIMESTAMP__
-
----
-This is an automated notification from your Nanobot CI/CD pipeline.
-EOF
-
-          STATUS_TABLE=$(cat /tmp/status_table.txt)
-          TIMESTAMP=$(date -u +'%Y-%m-%d %H:%M:%S UTC')
-
-          sed -i \
-            -e "s|__EMOJI__|${EMOJI}|g" \
-            -e "s|__STATUS__|$(echo "$STATUS" | tr '[:lower:]' '[:upper:]')|g" \
-            -e "s|__VERSION__|${VERSION}|g" \
-            -e "s|__REPOSITORY__|${{ github.repository }}|g" \
-            -e "s|__REF_NAME__|${{ github.ref_name }}|g" \
-            -e "s|__SHA__|${{ github.sha }}|g" \
-            -e "s|__ACTOR__|${{ github.actor }}|g" \
-            -e "s|__RUN_ID__|${{ github.run_id }}|g" \
-            -e "s|__SERVER_URL__|${{ github.server_url }}|g" \
-            -e "s|__UPSTREAM_REPO__|${{ env.UPSTREAM_REPO }}|g" \
-            -e "s|__TIMESTAMP__|${TIMESTAMP}|g" \
-            /tmp/email_body.txt
-
-          # Insert status table (multiline) separately via Python to avoid sed delimiter collisions
-          python3 - <<PYEOF
-content = open('/tmp/email_body.txt').read()
-table   = open('/tmp/status_table.txt').read()
-open('/tmp/email_body.txt', 'w').write(content.replace('__STATUS_TABLE__', table))
-PYEOF
+          print(f"Subject : {subject}")
+          print(f"Body written to /tmp/email_body.txt ({len(body)} chars)")
+          PYEOF
 
       - name: Send email notification
         uses: dawidd6/action-send-mail@v3
@@ -555,7 +559,7 @@ PYEOF
         run: |
           echo "## 📧 Email Notification Sent" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "${{ steps.email.outputs.emoji }} **Status:** ${{ steps.status.outputs.status }}" >> $GITHUB_STEP_SUMMARY
+          echo "**[${{ steps.email.outputs.status_label }}] Status:** ${{ steps.status.outputs.status }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Subject:** ${{ steps.email.outputs.subject }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
