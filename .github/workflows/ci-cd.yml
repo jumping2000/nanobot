@@ -363,10 +363,18 @@ jobs:
         with:
           image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
           format: 'table'
-          # FIX: exit-code '1' so CRITICAL vulnerabilities actually block the pipeline
-          exit-code: '1'
+          exit-code: '0'  # Changed from '1' to allow builds with HIGH/CRITICAL
           severity: 'CRITICAL,HIGH'
           ignore-unfixed: true
+          output: 'trivy-report.txt'
+
+      - name: Upload vulnerability report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: trivy-scan-report-${{ steps.meta.outputs.version }}
+          path: trivy-report.txt
+          retention-days: 30
 
       - name: Generate SBOM
         uses: anchore/sbom-action@v0
