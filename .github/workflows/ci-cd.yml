@@ -557,7 +557,7 @@ jobs:
           body: file:///tmp/email_body.txt
           to: ${{ secrets.NOTIFICATION_EMAIL }}
           from: Nanobot CI/CD <${{ secrets.SMTP_USERNAME }}>
-          secure: true
+          secure: false #true default to false, since some servers use STARTTLS on the same port
           convert_markdown: true
 
       - name: Create notification summary
