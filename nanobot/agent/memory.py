@@ -347,7 +347,6 @@ class Consolidator:
     """Lightweight consolidation: summarizes evicted messages into history.jsonl."""
 
     _MAX_CONSOLIDATION_ROUNDS = 5
-    _MAX_CHUNK_MESSAGES = 60  # hard cap per consolidation round
 
     _SAFETY_BUFFER = 1024  # extra headroom for tokenizer estimation drift
 
@@ -399,22 +398,6 @@ class Consolidator:
             removed_tokens += estimate_message_tokens(message)
 
         return last_boundary
-
-    def _cap_consolidation_boundary(
-        self,
-        session: Session,
-        end_idx: int,
-    ) -> int | None:
-        """Clamp the chunk size without breaking the user-turn boundary."""
-        start = session.last_consolidated
-        if end_idx - start <= self._MAX_CHUNK_MESSAGES:
-            return end_idx
-
-        capped_end = start + self._MAX_CHUNK_MESSAGES
-        for idx in range(capped_end, start, -1):
-            if session.messages[idx].get("role") == "user":
-                return idx
-        return None
 
     def estimate_session_prompt_tokens(self, session: Session) -> tuple[int, str]:
         """Estimate current prompt size for the normal session history view."""
@@ -478,22 +461,16 @@ class Consolidator:
         async with lock:
             budget = self.context_window_tokens - self.max_completion_tokens - self._SAFETY_BUFFER
             target = budget // 2
-            try:
-                estimated, source = self.estimate_session_prompt_tokens(session)
-            except Exception:
-                logger.exception("Token estimation failed for {}", session.key)
-                estimated, source = 0, "error"
+            estimated, source = self.estimate_session_prompt_tokens(session)
             if estimated <= 0:
                 return
             if estimated < budget:
-                unconsolidated_count = len(session.messages) - session.last_consolidated
                 logger.debug(
-                    "Token consolidation idle {}: {}/{} via {}, msgs={}",
+                    "Token consolidation idle {}: {}/{} via {}",
                     session.key,
                     estimated,
                     self.context_window_tokens,
                     source,
-                    unconsolidated_count,
                 )
                 return
 
@@ -511,15 +488,6 @@ class Consolidator:
                     return
 
                 end_idx = boundary[0]
-                end_idx = self._cap_consolidation_boundary(session, end_idx)
-                if end_idx is None:
-                    logger.debug(
-                        "Token consolidation: no capped boundary for {} (round {})",
-                        session.key,
-                        round_num,
-                    )
-                    return
-
                 chunk = session.messages[session.last_consolidated:end_idx]
                 if not chunk:
                     return
@@ -538,11 +506,7 @@ class Consolidator:
                 session.last_consolidated = end_idx
                 self.sessions.save(session)
 
-                try:
-                    estimated, source = self.estimate_session_prompt_tokens(session)
-                except Exception:
-                    logger.exception("Token estimation failed for {}", session.key)
-                    estimated, source = 0, "error"
+                estimated, source = self.estimate_session_prompt_tokens(session)
                 if estimated <= 0:
                     return
 
@@ -611,15 +575,13 @@ class Dream:
         )
 
         # Current file contents
-        current_date = datetime.now().strftime("%Y-%m-%d")
         current_memory = self.store.read_memory() or "(empty)"
         current_soul = self.store.read_soul() or "(empty)"
         current_user = self.store.read_user() or "(empty)"
         file_context = (
-            f"## Current Date\n{current_date}\n\n"
-            f"## Current MEMORY.md ({len(current_memory)} chars)\n{current_memory}\n\n"
-            f"## Current SOUL.md ({len(current_soul)} chars)\n{current_soul}\n\n"
-            f"## Current USER.md ({len(current_user)} chars)\n{current_user}"
+            f"## Current MEMORY.md\n{current_memory}\n\n"
+            f"## Current SOUL.md\n{current_soul}\n\n"
+            f"## Current USER.md\n{current_user}"
         )
 
         # Phase 1: Analyze
@@ -641,7 +603,7 @@ class Dream:
                 tool_choice=None,
             )
             analysis = phase1_response.content or ""
-            logger.debug("Dream Phase 1 analysis ({} chars): {}", len(analysis), analysis[:500])
+            logger.debug("Dream Phase 1 complete ({} chars)", len(analysis))
         except Exception:
             logger.exception("Dream Phase 1 failed")
             return False
@@ -671,8 +633,6 @@ class Dream:
                 "Dream Phase 2 complete: stop_reason={}, tool_events={}",
                 result.stop_reason, len(result.tool_events),
             )
-            for ev in (result.tool_events or []):
-                logger.info("Dream tool_event: name={}, status={}, detail={}", ev.get("name"), ev.get("status"), ev.get("detail", "")[:200])
         except Exception:
             logger.exception("Dream Phase 2 failed")
             result = None

@@ -6,7 +6,6 @@
     <a href="https://pepy.tech/project/nanobot-ai"><img src="https://static.pepy.tech/badge/nanobot-ai" alt="Downloads"></a>
     <img src="https://img.shields.io/badge/python-≥3.11-blue" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
-    <a href="https://nanobot.wiki/docs/0.1.5/getting-started/nanobot-overview"><img src="https://img.shields.io/badge/Docs-nanobot.wiki-blue?style=flat&logo=readthedocs&logoColor=white" alt="Docs"></a>
     <a href="./COMMUNICATION.md"><img src="https://img.shields.io/badge/Feishu-Group-E9DBFC?style=flat&logo=feishu&logoColor=white" alt="Feishu"></a>
     <a href="./COMMUNICATION.md"><img src="https://img.shields.io/badge/WeChat-Group-C5EAB4?style=flat&logo=wechat&logoColor=white" alt="WeChat"></a>
     <a href="https://discord.gg/MnCvHqpUGB"><img src="https://img.shields.io/badge/Discord-Community-5865F2?style=flat&logo=discord&logoColor=white" alt="Discord"></a>
@@ -21,24 +20,22 @@
 
 ## 📢 News
 
-- **2026-04-05** 🚀 Released **v0.1.5** — sturdier long-running tasks, Dream two-stage memory, production-ready sandboxing and programming Agent SDK. Please see [release notes](https://github.com/HKUDS/nanobot/releases/tag/v0.1.5) for details.
 - **2026-04-04** 🚀 Jinja2 response templates, Dream memory hardened, smarter retry handling.
 - **2026-04-03** 🧠 Xiaomi MiMo provider, chain-of-thought reasoning visible, Telegram UX polish.
-- **2026-04-02** 🧱 Long-running tasks run more reliably — core runtime hardening.
+- **2026-04-02** 🧱 **Long-running tasks** run more reliably — core runtime hardening.
 - **2026-04-01** 🔑 GitHub Copilot auth restored; stricter workspace paths; OpenRouter Claude caching fix.
 - **2026-03-31** 🛰️ WeChat multimodal alignment, Discord/Matrix polish, Python SDK facade, MCP and tool fixes.
 - **2026-03-30** 🧩 OpenAI-compatible API tightened; composable agent lifecycle hooks.
 - **2026-03-29** 💬 WeChat voice, typing, QR/media resilience; fixed-session OpenAI-compatible API.
 - **2026-03-28** 📚 Provider docs refresh; skill template wording fix.
 - **2026-03-27** 🚀 Released **v0.1.4.post6** — architecture decoupling, litellm removal, end-to-end streaming, WeChat channel, and a security fix. Please see [release notes](https://github.com/HKUDS/nanobot/releases/tag/v0.1.4.post6) for details.
-
+- **2026-03-26** 🏗️ Agent runner extracted and lifecycle hooks unified; stream delta coalescing at boundaries.
+- **2026-03-25** 🌏 StepFun provider, configurable timezone, Gemini thought signatures.
+- **2026-03-24** 🔧 WeChat compatibility, Feishu CardKit streaming, test suite restructured.
 
 <details>
 <summary>Earlier news</summary>
 
-- **2026-03-26** 🏗️ Agent runner extracted and lifecycle hooks unified; stream delta coalescing at boundaries.
-- **2026-03-25** 🌏 StepFun provider, configurable timezone, Gemini thought signatures.
-- **2026-03-24** 🔧 WeChat compatibility, Feishu CardKit streaming, test suite restructured.
 - **2026-03-23** 🔧 Command routing refactored for plugins, WhatsApp/WeChat media, unified channel login CLI.
 - **2026-03-22** ⚡ End-to-end streaming, WeChat channel, Anthropic cache optimization, `/status` command.
 - **2026-03-21** 🔒 Replace `litellm` with native `openai` + `anthropic` SDKs. Please see [commit](https://github.com/HKUDS/nanobot/commit/3dfdab7).
@@ -394,8 +391,7 @@ If you prefer to configure manually, add the following to `~/.nanobot/config.jso
       "enabled": true,
       "token": "YOUR_BOT_TOKEN",
       "allowFrom": ["YOUR_USER_ID"],
-      "groupPolicy": "mention",
-      "streaming": true
+      "groupPolicy": "mention"
     }
   }
 }
@@ -406,7 +402,6 @@ If you prefer to configure manually, add the following to `~/.nanobot/config.jso
 > - `"open"` — Respond to all messages
 > DMs always respond when the sender is in `allowFrom`.
 > - If you set group policy to open create new threads as private threads and then @ the bot into it. Otherwise the thread itself and the channel in which you spawned it will spawn a bot session.
-> `streaming` defaults to `true`. Disable it only if you explicitly want non-streaming replies.
 
 **5. Invite the bot**
 - OAuth2 → URL Generator
@@ -560,9 +555,6 @@ Uses **WebSocket** long connection — no public IP required.
       "verificationToken": "",
       "allowFrom": ["ou_YOUR_OPEN_ID"],
       "groupPolicy": "mention",
-      "reactEmoji": "OnIt",
-      "doneEmoji": "DONE",
-      "toolHintPrefix": "🔧",
       "streaming": true
     }
   }
@@ -573,9 +565,6 @@ Uses **WebSocket** long connection — no public IP required.
 > `encryptKey` and `verificationToken` are optional for Long Connection mode.
 > `allowFrom`: Add your open_id (find it in nanobot logs when you message the bot). Use `["*"]` to allow all users.
 > `groupPolicy`: `"mention"` (default — respond only when @mentioned), `"open"` (respond to all group messages). Private chats always respond.
-> `reactEmoji`: Emoji for "processing" status (default: `OnIt`). See [available emojis](https://open.larkoffice.com/document/server-docs/im-v1/message-reaction/emojis-introduce).
-> `doneEmoji`: Optional emoji for "completed" status (e.g., `DONE`, `OK`, `HEART`). When set, bot adds this reaction after removing `reactEmoji`.
-> `toolHintPrefix`: Prefix for inline tool hints in streaming cards (default: `🔧`).
 
 **3. Run**
 
@@ -1525,32 +1514,6 @@ Common examples: `UTC`, `America/New_York`, `America/Los_Angeles`, `Europe/Londo
 
 > Need another timezone? Browse the full [IANA Time Zone Database](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones).
 
-### Unified Session
-
-By default, each channel × chat ID combination gets its own session. If you use nanobot across multiple channels (e.g. Telegram + Discord + CLI) and want them to share the same conversation, enable `unifiedSession`:
-
-```json
-{
-  "agents": {
-    "defaults": {
-      "unifiedSession": true
-    }
-  }
-}
-```
-
-When enabled, all incoming messages — regardless of which channel they arrive on — are routed into a single shared session. Switching from Telegram to Discord (or any other channel) continues the same conversation seamlessly.
-
-| Behavior | `false` (default) | `true` |
-|----------|-------------------|--------|
-| Session key | `channel:chat_id` | `unified:default` |
-| Cross-channel continuity | No | Yes |
-| `/new` clears | Current channel session | Shared session |
-| `/stop` finds tasks | By channel session | By shared session |
-| Existing `session_key_override` (e.g. Telegram thread) | Respected | Still respected — not overwritten |
-
-> This is designed for single-user, multi-device setups. It is **off by default** — existing users see zero behavior change.
-
 ## 🧩 Multiple Instances
 
 Run multiple nanobot instances simultaneously with separate configs and runtime data. Use `--config` as the main entrypoint. Optionally pass `--workspace` during `onboard` when you want to initialize or update the saved workspace for a specific instance.
@@ -1847,8 +1810,7 @@ print(resp.choices[0].message.content)
 ## 🐳 Docker
 
 > [!TIP]
-> The `-v ~/.nanobot:/home/nanobot/.nanobot` flag mounts your local config directory into the container, so your config and workspace persist across container restarts.
-> The container runs as user `nanobot` (UID 1000). If you get **Permission denied**, fix ownership on the host first: `sudo chown -R 1000:1000 ~/.nanobot`, or pass `--user $(id -u):$(id -g)` to match your host UID. Podman users can use `--userns=keep-id` instead.
+> The `-v ~/.nanobot:/root/.nanobot` flag mounts your local config directory into the container, so your config and workspace persist across container restarts.
 
 ### Docker Compose
 
@@ -1871,17 +1833,17 @@ docker compose down                                      # stop
 docker build -t nanobot .
 
 # Initialize config (first time only)
-docker run -v ~/.nanobot:/home/nanobot/.nanobot --rm nanobot onboard
+docker run -v ~/.nanobot:/root/.nanobot --rm nanobot onboard
 
 # Edit config on host to add API keys
 vim ~/.nanobot/config.json
 
 # Run gateway (connects to enabled channels, e.g. Telegram/Discord/Mochat)
-docker run -v ~/.nanobot:/home/nanobot/.nanobot -p 18790:18790 nanobot gateway
+docker run -v ~/.nanobot:/root/.nanobot -p 18790:18790 nanobot gateway
 
 # Or run a single command
-docker run -v ~/.nanobot:/home/nanobot/.nanobot --rm nanobot agent -m "Hello!"
-docker run -v ~/.nanobot:/home/nanobot/.nanobot --rm nanobot status
+docker run -v ~/.nanobot:/root/.nanobot --rm nanobot agent -m "Hello!"
+docker run -v ~/.nanobot:/root/.nanobot --rm nanobot status
 ```
 
 ## 🐧 Linux Service
