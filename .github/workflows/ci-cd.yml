@@ -392,13 +392,10 @@ jobs:
       - name: Test Docker image
         run: |
           echo "🐳 Testing Docker image..."
-          docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
-          docker run --rm \
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }} \
-            nanobot --help
-          docker run --rm \
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }} \
-            nanobot status || echo "Expected: status requires config"
+          IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}"
+          docker pull "$IMAGE"
+          docker run --rm "$IMAGE" --help
+          docker run --rm "$IMAGE" status || echo "Expected: status requires config"
           echo "✅ Docker image tests passed"
 
       - name: Create build summary
