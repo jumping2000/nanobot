@@ -2,8 +2,8 @@ name: Nanobot Docker Build
 
 on:
   schedule:
-    # Check for new releases daily at 6 AM UTC
-    - cron: '0 0 * * *'
+    # Check for new releases on day 1 of the month iin January
+    - cron: '0 3 1 1 *'
   workflow_dispatch:
     inputs:
       release_version:
