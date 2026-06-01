@@ -2,16 +2,25 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { useClient } from "@/providers/ClientProvider";
 import { toMediaAttachment } from "@/lib/media";
-import { toolTraceLinesFromEvents } from "@/lib/tool-traces";
+import {
+  mergeToolProgressEvents,
+  mergeUniqueToolTraceLines,
+  normalizeToolProgressEvents,
+  toolTraceLinesFromEvents,
+} from "@/lib/tool-traces";
 import type { StreamError } from "@/lib/nanobot-client";
 import type {
   InboundEvent,
+  OutboundCliAppMention,
   OutboundImageGeneration,
+  OutboundMcpPresetMention,
   OutboundMedia,
   GoalStateWsPayload,
+  ToolProgressEvent,
   UIImage,
   UIFileEdit,
   UIMessage,
+  WorkspaceScopePayload,
 } from "@/lib/types";
 
 interface StreamBuffer {
@@ -27,6 +36,8 @@ interface ActiveAssistantCursor {
 type PendingStreamEvent =
   | { kind: "delta"; text: string }
   | { kind: "reasoning"; text: string };
+
+const FILE_EDIT_TOOL_NAMES = new Set(["write_file", "edit_file", "apply_patch"]);
 
 /** Find a still-open streamed assistant turn. Closed stream segments stay visible
  * as streaming until ``turn_end`` for visual continuity, but they must not
@@ -47,11 +58,10 @@ function findStreamingAssistantIndex(
 /**
  * Append a reasoning chunk to the last open reasoning stream in ``prev``.
  *
- * Lookup rule: prefer the most recent assistant turn in the active UI tail.
- * Most providers emit reasoning before answer text, but some only expose
- * ``reasoning_content`` after the answer stream completes. In that post-hoc
- * case the reasoning still belongs to the same assistant turn and must render
- * above the answer, not as a new row below it.
+ * Lookup rule: reasoning can only extend the current reasoning placeholder.
+ * Once ordinary answer text has appeared, the next reasoning chunk starts a
+ * fresh Thought block so streamed output stays in arrival order:
+ * Thought -> answer -> Thought -> answer.
  */
 function attachReasoningChunk(
   prev: UIMessage[],
@@ -72,24 +82,15 @@ function attachReasoningChunk(
     if (candidate.role !== "assistant") continue;
     const activitySegmentId = candidate.activitySegmentId ?? segments?.ensure();
     const hasAnswer = candidate.content.length > 0;
+    if (hasAnswer) break;
     if (
       candidate.reasoningStreaming
       || candidate.reasoning !== undefined
-      || hasAnswer
       || candidate.isStreaming
     ) {
       const merged: UIMessage = {
         ...candidate,
         reasoning: (candidate.reasoning ?? "") + chunk,
-        reasoningStreaming: true,
-        ...(activitySegmentId ? { activitySegmentId } : {}),
-      };
-      return [...prev.slice(0, i), merged, ...prev.slice(i + 1)];
-    }
-    if (!hasAnswer && candidate.isStreaming) {
-      const merged: UIMessage = {
-        ...candidate,
-        reasoning: chunk,
         reasoningStreaming: true,
         ...(activitySegmentId ? { activitySegmentId } : {}),
       };
@@ -219,6 +220,69 @@ function fileEditKey(edit: Pick<UIFileEdit, "call_id" | "tool" | "path">): strin
   return `${edit.tool}|${edit.path}`;
 }
 
+function toolEventFileEditKey(event: ToolProgressEvent): string | null {
+  const fn = (event as { function?: { name?: unknown } }).function;
+  const name = typeof event.name === "string"
+    ? event.name
+    : typeof fn?.name === "string"
+      ? fn.name
+      : "";
+  const callId = typeof event.call_id === "string" ? event.call_id : "";
+  if (!name || !callId || !FILE_EDIT_TOOL_NAMES.has(name)) return null;
+  return `${callId}|${name}`;
+}
+
+function hasFileEditForToolEvent(messages: UIMessage[], event: ToolProgressEvent): boolean {
+  const key = toolEventFileEditKey(event);
+  if (!key) return false;
+  return messages.some((message) =>
+    message.fileEdits?.some((edit) => fileEditKey(edit) === key),
+  );
+}
+
+function filterCoveredFileEditToolEvents(
+  messages: UIMessage[],
+  events: ToolProgressEvent[],
+): ToolProgressEvent[] {
+  if (events.length === 0) return events;
+  return events.filter((event) => !hasFileEditForToolEvent(messages, event));
+}
+
+function stripCoveredFileEditToolHints(message: UIMessage, edits: UIFileEdit[]): UIMessage {
+  const incomingKeys = new Set(edits.map(fileEditKey));
+  const events = message.toolEvents ?? [];
+  if (!events.length || incomingKeys.size === 0) return message;
+
+  const removedTraceLines = new Set<string>();
+  const keptEvents: ToolProgressEvent[] = [];
+  let changed = false;
+  for (const event of events) {
+    const key = toolEventFileEditKey(event);
+    if (key && incomingKeys.has(key)) {
+      changed = true;
+      for (const line of toolTraceLinesFromEvents([event])) {
+        removedTraceLines.add(line);
+      }
+      continue;
+    }
+    keptEvents.push(event);
+  }
+  if (!changed) return message;
+
+  const previousTraces = message.traces?.length
+    ? message.traces
+    : message.content
+      ? [message.content]
+      : [];
+  const nextTraces = previousTraces.filter((line) => !removedTraceLines.has(line));
+  return {
+    ...message,
+    traces: nextTraces,
+    content: nextTraces[nextTraces.length - 1] ?? "",
+    toolEvents: keptEvents.length ? keptEvents : undefined,
+  };
+}
+
 function normalizeFileEdit(edit: UIFileEdit): UIFileEdit | null {
   if (!edit || !edit.tool || (!edit.path && !edit.pending)) return null;
   const inferredStatus =
@@ -269,10 +333,14 @@ function findFileEditTraceIndex(
   for (let i = prev.length - 1; i >= 0; i -= 1) {
     const candidate = prev[i];
     if (candidate.role === "user") break;
-    if (candidate.kind !== "trace" || !candidate.fileEdits?.length) continue;
+    if (candidate.kind !== "trace") continue;
     if (segmentId && candidate.activitySegmentId === segmentId) return i;
-    for (const existing of candidate.fileEdits) {
+    for (const existing of candidate.fileEdits ?? []) {
       if (incomingKeys.has(fileEditKey(existing))) return i;
+    }
+    for (const event of candidate.toolEvents ?? []) {
+      const key = toolEventFileEditKey(event);
+      if (key && incomingKeys.has(key)) return i;
     }
   }
   return null;
@@ -297,6 +365,9 @@ export interface SendImage {
 
 export interface SendOptions {
   imageGeneration?: OutboundImageGeneration;
+  cliApps?: OutboundCliAppMention[];
+  mcpPresets?: OutboundMcpPresetMention[];
+  workspaceScope?: WorkspaceScopePayload | null;
 }
 
 export function useNanobotStream(
@@ -398,13 +469,19 @@ export function useNanobotStream(
     if (closedStreamId) closedAssistantStreamIdsRef.current.add(closedStreamId);
     buffer.current = null;
     activeAssistantRef.current = null;
+    return !!closedStreamId;
   }, []);
 
   const resolveActiveAssistantIndex = useCallback((prev: UIMessage[]): number | null => {
     const cursor = activeAssistantRef.current;
     if (!cursor) return null;
     const indexed = prev[cursor.index];
-    if (indexed?.id === cursor.id && indexed.role === "assistant" && indexed.kind !== "trace") {
+    if (
+      indexed?.id === cursor.id
+      && indexed.role === "assistant"
+      && indexed.kind !== "trace"
+      && indexed.isStreaming
+    ) {
       return cursor.index;
     }
     const idx = prev.findIndex((m) => m.id === cursor.id);
@@ -413,7 +490,7 @@ export function useNanobotStream(
       return null;
     }
     const found = prev[idx];
-    if (found.role !== "assistant" || found.kind === "trace") {
+    if (found.role !== "assistant" || found.kind === "trace" || !found.isStreaming) {
       activeAssistantRef.current = null;
       return null;
     }
@@ -471,34 +548,67 @@ export function useNanobotStream(
           text += events[i].text;
           i += 1;
         }
-        next = kind === "delta"
-          ? appendAnswerChunk(next, text)
-          : attachReasoningChunk(next, text, {
-              ensure: ensureActivitySegmentId,
-            });
+        if (kind === "delta") {
+          next = appendAnswerChunk(next, text);
+        } else {
+          if (closeActiveAssistantStream()) clearActivitySegment();
+          next = attachReasoningChunk(next, text, {
+            ensure: ensureActivitySegmentId,
+          });
+        }
       }
       return next;
     },
-    [appendAnswerChunk, ensureActivitySegmentId],
+    [appendAnswerChunk, clearActivitySegment, closeActiveAssistantStream, ensureActivitySegmentId],
   );
 
-  const flushPendingStreamEvents = useCallback((options?: { closeAnswerSegment?: boolean }) => {
+  const flushPendingStreamEvents = useCallback((options?: {
+    closeAnswerSegment?: boolean;
+    finalAnswerText?: string;
+  }) => {
     if (streamFrameRef.current !== null) {
       window.cancelAnimationFrame(streamFrameRef.current);
       streamFrameRef.current = null;
     }
     const events = pendingStreamEventsRef.current;
-    if (events.length === 0) {
+    const finalAnswerText = options?.finalAnswerText;
+    if (events.length === 0 && finalAnswerText === undefined) {
       if (options?.closeAnswerSegment) closeActiveAssistantStream();
       return;
     }
     pendingStreamEventsRef.current = [];
     setMessages((prev) => {
-      const next = applyPendingStreamEvents(prev, events);
+      let next = events.length > 0 ? applyPendingStreamEvents(prev, events) : prev;
+      if (finalAnswerText !== undefined) {
+        const targetIndex =
+          resolveActiveAssistantIndex(next)
+          ?? findStreamingAssistantIndex(next, closedAssistantStreamIdsRef.current);
+          if (targetIndex !== null) {
+            const target = next[targetIndex];
+            next = replaceMessageAt(next, targetIndex, {
+              ...target,
+              content: finalAnswerText,
+              isStreaming: true,
+            });
+          } else {
+            const id = crypto.randomUUID();
+            closedAssistantStreamIdsRef.current.add(id);
+            next = [
+              ...next,
+              {
+                id,
+                role: "assistant",
+                content: finalAnswerText,
+                isStreaming: true,
+                createdAt: Date.now(),
+              },
+            ];
+          }
+        }
       if (options?.closeAnswerSegment) closeActiveAssistantStream();
       return next;
     });
-  }, [applyPendingStreamEvents, closeActiveAssistantStream]);
+  }, [applyPendingStreamEvents, closeActiveAssistantStream, resolveActiveAssistantIndex]);
 
   const schedulePendingStreamFlush = useCallback(() => {
     if (streamFrameRef.current !== null) return;
@@ -576,7 +686,10 @@ export function useNanobotStream(
       }
 
       if (ev.event === "stream_end") {
-        flushPendingStreamEvents({ closeAnswerSegment: true });
+        flushPendingStreamEvents({
+          closeAnswerSegment: true,
+          ...(typeof ev.text === "string" ? { finalAnswerText: ev.text } : {}),
+        });
         if (suppressStreamUntilTurnEndRef.current) return;
         // stream_end only means the text segment finished — the model may
         // still be executing tools.  Do NOT reset isStreaming here; the
@@ -584,7 +697,13 @@ export function useNanobotStream(
         return;
       }
 
-      flushPendingStreamEvents();
+      const shouldCloseAnswerBeforeEvent =
+        ev.event === "file_edit"
+        || (
+          ev.event === "message"
+          && (ev.kind === "tool_hint" || ev.kind === "progress")
+        );
+      flushPendingStreamEvents({ closeAnswerSegment: shouldCloseAnswerBeforeEvent });
 
       if (ev.event === "reasoning_end") {
         if (suppressStreamUntilTurnEndRef.current) return;
@@ -610,6 +729,7 @@ export function useNanobotStream(
         if ("goal_state" in ev && ev.goal_state != null && typeof ev.goal_state === "object") {
           setGoalState(ev.goal_state);
         }
+        setRunStartedAt(null);
         // Definitive signal that the turn is fully complete.  Cancel any
         // pending debounce timer and stop the loading indicator immediately.
         if (streamEndTimerRef.current !== null) {
@@ -657,16 +777,21 @@ export function useNanobotStream(
         // Attach them to the last trace row if it was the last emitted item
         // so a sequence of calls collapses into one compact trace group.
         if (ev.kind === "tool_hint" || ev.kind === "progress") {
-          const structuredLines = toolTraceLinesFromEvents(ev.tool_events);
-          const lines = structuredLines.length > 0
-            ? structuredLines
-            : ev.text
-              ? [ev.text]
-              : [];
-          if (lines.length === 0) return;
+          const structuredEvents = normalizeToolProgressEvents(ev.tool_events);
           setMessages((prev) => {
             const segmentId = ensureActivitySegmentId();
-            const last = prev[prev.length - 1];
+            const base = prev;
+            const visibleStructuredEvents = filterCoveredFileEditToolEvents(base, structuredEvents);
+            const structuredLines = toolTraceLinesFromEvents(visibleStructuredEvents);
+            const lines = structuredLines.length > 0
+              ? structuredLines
+              : structuredEvents.length > 0
+                ? []
+                : ev.text
+                  ? [ev.text]
+                  : [];
+            if (lines.length === 0) return base;
+            const last = base[base.length - 1];
             if (
               last
               && last.kind === "trace"
@@ -678,22 +803,31 @@ export function useNanobotStream(
                 : last.content
                   ? [last.content]
                   : [];
+              const mergedLines = visibleStructuredEvents.length > 0
+                ? mergeUniqueToolTraceLines(previousTraces, structuredLines)
+                : null;
               const merged: UIMessage = {
                 ...last,
-                traces: [...previousTraces, ...lines],
-                content: lines[lines.length - 1],
+                traces: mergedLines ? mergedLines.traces : [...previousTraces, ...lines],
+                content: mergedLines
+                  ? mergedLines.traces[mergedLines.traces.length - 1]
+                  : lines[lines.length - 1],
+                toolEvents: visibleStructuredEvents.length
+                  ? mergeToolProgressEvents(last.toolEvents, visibleStructuredEvents)
+                  : last.toolEvents,
                 activitySegmentId: last.activitySegmentId ?? segmentId,
               };
-              return [...prev.slice(0, -1), merged];
+              return [...base.slice(0, -1), merged];
             }
             return [
-              ...prev,
+              ...base,
               {
                 id: crypto.randomUUID(),
                 role: "tool",
                 kind: "trace",
                 content: lines[lines.length - 1],
                 traces: lines,
+                ...(visibleStructuredEvents.length ? { toolEvents: visibleStructuredEvents } : {}),
                 activitySegmentId: segmentId,
                 createdAt: Date.now(),
               },
@@ -748,22 +882,24 @@ export function useNanobotStream(
         }
         setMessages((prev) => {
           let segmentId = eventSegmentId;
-          const targetIndex = findFileEditTraceIndex(prev, segmentId, normalized);
+          const base = prev;
+          const targetIndex = findFileEditTraceIndex(base, segmentId, normalized);
           if (targetIndex !== null) {
-            const target = prev[targetIndex];
+            const target = base[targetIndex];
             segmentId = target.activitySegmentId ?? segmentId ?? detachedActivitySegmentId();
             if (opensFileEditPhase) fileEditSegmentRef.current = segmentId;
+            const cleanedTarget = stripCoveredFileEditToolHints(target, normalized);
             const merged: UIMessage = {
-              ...target,
-              fileEdits: mergeFileEdits(target.fileEdits, normalized),
+              ...cleanedTarget,
+              fileEdits: mergeFileEdits(cleanedTarget.fileEdits, normalized),
               activitySegmentId: segmentId,
             };
-            return replaceMessageAt(prev, targetIndex, merged);
+            return replaceMessageAt(base, targetIndex, merged);
           }
           segmentId = segmentId ?? detachedActivitySegmentId();
           if (opensFileEditPhase) fileEditSegmentRef.current = segmentId;
           return [
-            ...prev,
+            ...base,
             {
               id: crypto.randomUUID(),
               role: "tool",
@@ -830,6 +966,8 @@ export function useNanobotStream(
             content,
             createdAt: Date.now(),
             ...(previews ? { images: previews } : {}),
+            ...(options?.cliApps?.length ? { cliApps: options.cliApps } : {}),
+            ...(options?.mcpPresets?.length ? { mcpPresets: options.mcpPresets } : {}),
           },
         ];
       });
